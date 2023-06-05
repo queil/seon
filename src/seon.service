@@ -1,0 +1,11 @@
+[Unit]
+Description=Script Execution Over the Network
+
+[Service]
+Type=exec
+ExecStart=/opt/seon/seon
+WorkingDirectory=/opt/seon
+Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
+[Install]
+WantedBy=multi-user.target
