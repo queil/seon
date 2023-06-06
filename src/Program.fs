@@ -14,6 +14,8 @@ open Fli.CE
 open Microsoft.Extensions.Options
 open Fli
 open System.Security.Claims
+open System.Collections.Generic
+
 
 [<CLIMutable>]
 type JwtOptions =
@@ -29,32 +31,46 @@ type AuthOptions = { AllowedSub: string }
 type CommandOptions = { Path: string; WorkingDir: string }
 
 [<CLIMutable>]
+type SeonEndpoint =
+    { Auth: AuthOptions
+      Jwt: JwtOptions
+      Command: CommandOptions }
+
+
+[<CLIMutable>]
+type SeonConfig =
+    { Endpoints: Dictionary<string, SeonEndpoint> }
+
+
+[<CLIMutable>]
 type BasePathOptions = { BasePath: string }
 
-let runHandler: HttpHandler =
+let execute (endpoint: SeonEndpoint) : HttpHandler =
     fun (_: HttpFunc) (ctx: HttpContext) ->
 
         task {
-            let opts = ctx.RequestServices.GetRequiredService<IOptions<CommandOptions>>()
 
             ctx
-                .GetLogger()
-                .LogInformation("Running: {Path} ({WorkingDir})", opts.Value.Path, opts.Value.WorkingDir)
+                .GetLogger(ctx.Request.Path)
+                .LogInformation("Running: {Path} ({WorkingDir})", endpoint.Command.Path, endpoint.Command.WorkingDir)
 
             try
 
                 let! output =
                     cli {
                         Shell BASH
-                        Command(opts.Value.Path)
-                        WorkingDirectory(opts.Value.WorkingDir)
-                        Output(fun (s:string) -> ctx.GetLogger().LogInformation("log: {Message}", s))
+                        Command(endpoint.Command.Path)
+                        WorkingDirectory(endpoint.Command.WorkingDir)
+                        Output(fun (s: string) -> ctx.GetLogger().LogInformation("log: {Message}", s))
                     }
                     |> Command.executeAsync
                     |> Async.StartAsTask
-                output.Error |> Option.iter (fun s -> ctx.GetLogger().LogError("error: {Message}", s))
-                
-                if output.ExitCode <> 0 then ctx.SetStatusCode 500
+
+                output.Error
+                |> Option.iter (fun s -> ctx.GetLogger().LogError("error: {Message}", s))
+
+                if output.ExitCode <> 0 then
+                    ctx.SetStatusCode 500
 
                 return Some(ctx)
 
@@ -64,82 +80,91 @@ let runHandler: HttpHandler =
                 return Some(ctx)
         }
 
-let webApp =
-    choose
-        [ GET
-          >=> choose
-              [ route "/health" >=> Successful.OK "Healthy"
-                route "/run"
-                >=> requiresAuthentication (RequestErrors.UNAUTHORIZED "Bearer" "seon" 401)
-                >=> authorizeByPolicyName "SubPolicy" (RequestErrors.FORBIDDEN 403)
-                >=> runHandler ]
-          setStatusCode 404 ]
-
-// ---------------------------------
-// Error handler
-// ---------------------------------
-
 let errorHandler (ex: Exception) (logger: ILogger) =
     logger.LogError(ex, "An unhandled exception has occurred while executing the request.")
-
-    clearResponse >=> setStatusCode 500 >=> text ex.Message
-
-// ---------------------------------
-// Config and Main
-// ---------------------------------
+    clearResponse >=> setStatusCode 500
 
 let builder = WebApplication.CreateBuilder()
 builder.Host.UseSystemd() |> ignore
 
-
 let services = builder.Services
-let config = builder.Configuration
+
+let config =
+    ConfigurationBuilder()
+        .AddJsonFile("appsettings.json", true)
+        .AddEnvironmentVariables()
+        .Build()
 
 services
-    .Configure<CommandOptions>(config.GetSection("command"))
     .Configure<BasePathOptions>(config)
     .AddOptions()
     .AddCors()
     .AddLogging()
     .AddGiraffe()
-    .AddAuthorization(fun (options) ->
-
-        let authOptions = config.GetSection("auth").Get<AuthOptions>()
-
-        options.AddPolicy(
-            "SubPolicy",
-            fun policy -> policy.RequireClaim(ClaimTypes.NameIdentifier, authOptions.AllowedSub) |> ignore
-        )
-        |> ignore)
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(fun opts ->
-        let jwtOptions = config.GetSection("jwt").Get<JwtOptions>()
-        opts.BackchannelHttpHandler <- new System.Net.Http.HttpClientHandler()
-        opts.Authority <- jwtOptions.Authority
-        opts.SaveToken <- true
-
-        if jwtOptions.Debug then
-            opts.Events <-
-                JwtBearerEvents(
-                    OnMessageReceived =
-                        fun x ->
-                            task {
-                                x.HttpContext
-                                    .GetService<ILogger<JwtOptions>>()
-                                    .LogDebug("Auth header: {Token}", x.Request.Headers.Authorization)
-                            }
-                )
-
-        opts.TokenValidationParameters <-
-            TokenValidationParameters(
-                ValidateIssuer = true,
-                ValidateLifetime = true,
-                ValidateIssuerSigningKey = true,
-                ValidateAudience = true,
-                ValidAudience = jwtOptions.Audience,
-                ValidIssuer = jwtOptions.Issuer
-            ))
 |> ignore
+
+
+let seonConfig = config.GetSection("seon").Get<SeonConfig>()
+
+
+let webApp =
+    choose
+        [ GET
+          >=> choose
+              [ route "/health" >=> Successful.OK "Healthy"
+
+                for KeyValue(path, config) in seonConfig.Endpoints do
+                    route path
+                    >=> requiresAuthentication (challenge path) //"path" (RequestErrors.UNAUTHORIZED path "seon" 401)
+                    >=> authorizeByPolicyName $"SubPolicy{path}" (RequestErrors.FORBIDDEN 403)
+                    >=> execute config ]
+          setStatusCode 404 ]
+
+let authBuilder =
+    services
+        .AddAuthorization(fun (options) ->
+
+            for KeyValue(path, config) in seonConfig.Endpoints do
+
+                options.AddPolicy(
+                    $"SubPolicy{path}",
+                    fun policy -> policy.RequireClaim(ClaimTypes.NameIdentifier, config.Auth.AllowedSub) |> ignore
+                )
+                |> ignore)
+        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+
+for KeyValue(path, config) in seonConfig.Endpoints do
+    authBuilder.AddJwtBearer(
+        path,
+        fun opts ->
+
+            opts.BackchannelHttpHandler <- new Net.Http.HttpClientHandler()
+            opts.Authority <- config.Jwt.Authority
+            opts.SaveToken <- true
+
+            if config.Jwt.Debug then
+                opts.Events <-
+                    JwtBearerEvents(
+                        OnMessageReceived =
+                            fun x ->
+                                task {
+                                    x.HttpContext
+                                        .GetService<ILogger<JwtOptions>>()
+                                        .LogDebug("Auth header: {Token}", x.Request.Headers.Authorization)
+                                }
+                    )
+
+            opts.TokenValidationParameters <-
+                TokenValidationParameters(
+                    ValidateIssuer = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidateAudience = true,
+                    ValidAudience = config.Jwt.Audience,
+                    ValidIssuer = config.Jwt.Issuer
+                )
+    )
+    |> ignore
 
 
 builder.Logging.AddConsole().AddDebug() |> ignore
