@@ -16,7 +16,6 @@ open Fli
 open System.Security.Claims
 open System.Collections.Generic
 
-
 [<CLIMutable>]
 type JwtOptions =
     { Authority: string
@@ -35,6 +34,8 @@ type SeonEndpoint =
     { Auth: AuthOptions
       Jwt: JwtOptions
       Command: CommandOptions }
+
+    member x.OverridesJwt = not <| obj.ReferenceEquals(x.Jwt, null)
 
 
 [<CLIMutable>]
@@ -87,8 +88,6 @@ let errorHandler (ex: Exception) (logger: ILogger) =
 
 let builder = WebApplication.CreateBuilder()
 builder.Host.UseSystemd() |> ignore
-builder.Logging.AddConsole().AddDebug() |> ignore
-
 let services = builder.Services
 
 let config =
@@ -128,26 +127,6 @@ let webApp =
                 ]
           setStatusCode 404 ]
 
-let authBuilder =
-    services
-        .AddAuthorization()
-        .AddAuthentication()
-        .AddPolicyScheme(
-            JwtBearerDefaults.AuthenticationScheme,
-            JwtBearerDefaults.AuthenticationScheme,
-            fun opts ->
-
-                opts.ForwardDefaultSelector <-
-                    (fun ctx ->
-
-                        let rqPath = ctx.Request.Path.ToString()
-
-                        if seonConfig.Endpoints.ContainsKey(rqPath) then
-                            $"Bearer{rqPath}"
-                        else
-                            "DefaultBearer")
-        )
-
 let configureJwtBearer (config: JwtOptions) =
     fun (opts: JwtBearerOptions) ->
         opts.BackchannelHttpHandler <- new Net.Http.HttpClientHandler()
@@ -176,15 +155,35 @@ let configureJwtBearer (config: JwtOptions) =
                 ValidIssuer = config.Issuer
             )
 
-authBuilder.AddJwtBearer("DefaultBearer", configureJwtBearer seonConfig.Jwt)
-|> ignore
+let authBuilder =
+    services
+        .AddAuthorization()
+        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer("DefaultBearer", configureJwtBearer seonConfig.Jwt)
+        .AddPolicyScheme(
+            JwtBearerDefaults.AuthenticationScheme,
+            JwtBearerDefaults.AuthenticationScheme,
+            fun opts ->
+                opts.ForwardDefault <- "DefaultBearer"
+
+                opts.ForwardDefaultSelector <-
+                    (fun ctx ->
+
+                        let rqPath = ctx.Request.Path.ToString()
+                        let (exists, value) = seonConfig.Endpoints.TryGetValue(rqPath)
+
+                        if exists && value.OverridesJwt then
+                            $"Bearer{rqPath}"
+                        else
+                            "DefaultBearer")
+        )
 
 for KeyValue(pathPrefix, config) in seonConfig.Endpoints do
-    if obj.ReferenceEquals(config.Jwt, null) then
-        ()
-    else
+    if config.OverridesJwt then
         authBuilder.AddJwtBearer($"Bearer{pathPrefix}", configureJwtBearer config.Jwt)
         |> ignore
+
+builder.Logging.AddConsole().AddDebug() |> ignore
 
 let app = builder.Build()
 
