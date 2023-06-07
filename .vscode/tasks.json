@@ -1,0 +1,22 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"command": "dotnet",
+			"args": [
+				"build",
+				"src"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"label": "build",
+			"type": "process",
+			"detail": "Build the Queil.Seon.fsproj project using dotnet build"
+		}
+	]
+}

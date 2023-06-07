@@ -39,7 +39,8 @@ type SeonEndpoint =
 
 [<CLIMutable>]
 type SeonConfig =
-    { Endpoints: Dictionary<string, SeonEndpoint> }
+    { Endpoints: Dictionary<string, SeonEndpoint>
+      Jwt: JwtOptions }
 
 
 [<CLIMutable>]
@@ -86,6 +87,7 @@ let errorHandler (ex: Exception) (logger: ILogger) =
 
 let builder = WebApplication.CreateBuilder()
 builder.Host.UseSystemd() |> ignore
+builder.Logging.AddConsole().AddDebug() |> ignore
 
 let services = builder.Services
 
@@ -103,71 +105,86 @@ services
     .AddGiraffe()
 |> ignore
 
-
 let seonConfig = config.GetSection("seon").Get<SeonConfig>()
+let accessDenied = setStatusCode 401
 
+let requiresValidSub validSub : HttpHandler =
+    authorizeUser (fun u -> u.HasClaim(ClaimTypes.NameIdentifier, validSub)) accessDenied
 
 let webApp =
     choose
-        [ GET
+        [ POST
+          >=> choose
+              [ for KeyValue(pathPrefix, config) in seonConfig.Endpoints do
+                    route pathPrefix
+                    >=> requiresAuthentication (RequestErrors.UNAUTHORIZED "Bearer" $"seon{pathPrefix}" 401)
+                    >=> requiresValidSub config.Auth.AllowedSub
+                    >=> execute config ]
+
+          GET
           >=> choose
               [ route "/health" >=> Successful.OK "Healthy"
 
-                for KeyValue(path, config) in seonConfig.Endpoints do
-                    route path
-                    >=> requiresAuthentication (challenge path) //"path" (RequestErrors.UNAUTHORIZED path "seon" 401)
-                    >=> authorizeByPolicyName $"SubPolicy{path}" (RequestErrors.FORBIDDEN 403)
-                    >=> execute config ]
+                ]
           setStatusCode 404 ]
 
 let authBuilder =
     services
-        .AddAuthorization(fun (options) ->
+        .AddAuthorization()
+        .AddAuthentication()
+        .AddPolicyScheme(
+            JwtBearerDefaults.AuthenticationScheme,
+            JwtBearerDefaults.AuthenticationScheme,
+            fun opts ->
 
-            for KeyValue(path, config) in seonConfig.Endpoints do
+                opts.ForwardDefaultSelector <-
+                    (fun ctx ->
 
-                options.AddPolicy(
-                    $"SubPolicy{path}",
-                    fun policy -> policy.RequireClaim(ClaimTypes.NameIdentifier, config.Auth.AllowedSub) |> ignore
+                        let rqPath = ctx.Request.Path.ToString()
+
+                        if seonConfig.Endpoints.ContainsKey(rqPath) then
+                            $"Bearer{rqPath}"
+                        else
+                            "DefaultBearer")
+        )
+
+let configureJwtBearer (config: JwtOptions) =
+    fun (opts: JwtBearerOptions) ->
+        opts.BackchannelHttpHandler <- new Net.Http.HttpClientHandler()
+        opts.Authority <- config.Authority
+        opts.SaveToken <- true
+
+        if config.Debug then
+            opts.Events <-
+                JwtBearerEvents(
+                    OnMessageReceived =
+                        fun x ->
+                            task {
+                                x.HttpContext
+                                    .GetService<ILogger<JwtBearerEvents>>()
+                                    .LogDebug("Auth header: {Token}", x.Request.Headers.Authorization)
+                            }
                 )
-                |> ignore)
-        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
-for KeyValue(path, config) in seonConfig.Endpoints do
-    authBuilder.AddJwtBearer(
-        path,
-        fun opts ->
+        opts.TokenValidationParameters <-
+            TokenValidationParameters(
+                ValidateIssuer = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidateAudience = true,
+                ValidAudience = config.Audience,
+                ValidIssuer = config.Issuer
+            )
 
-            opts.BackchannelHttpHandler <- new Net.Http.HttpClientHandler()
-            opts.Authority <- config.Jwt.Authority
-            opts.SaveToken <- true
+authBuilder.AddJwtBearer("DefaultBearer", configureJwtBearer seonConfig.Jwt)
+|> ignore
 
-            if config.Jwt.Debug then
-                opts.Events <-
-                    JwtBearerEvents(
-                        OnMessageReceived =
-                            fun x ->
-                                task {
-                                    x.HttpContext
-                                        .GetService<ILogger<JwtOptions>>()
-                                        .LogDebug("Auth header: {Token}", x.Request.Headers.Authorization)
-                                }
-                    )
-
-            opts.TokenValidationParameters <-
-                TokenValidationParameters(
-                    ValidateIssuer = true,
-                    ValidateLifetime = true,
-                    ValidateIssuerSigningKey = true,
-                    ValidateAudience = true,
-                    ValidAudience = config.Jwt.Audience,
-                    ValidIssuer = config.Jwt.Issuer
-                )
-    )
-    |> ignore
-
-
-builder.Logging.AddConsole().AddDebug() |> ignore
+for KeyValue(pathPrefix, config) in seonConfig.Endpoints do
+    if obj.ReferenceEquals(config.Jwt, null) then
+        ()
+    else
+        authBuilder.AddJwtBearer($"Bearer{pathPrefix}", configureJwtBearer config.Jwt)
+        |> ignore
 
 let app = builder.Build()
 
