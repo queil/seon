@@ -86,7 +86,7 @@ WantedBy=multi-user.target
 ```
 ### Install the service
 
-* Symlink `/opt/seon/seon.service` to /etc/systemd/system/seon.service`
+* Symlink `/opt/seon/seon.service` to `/etc/systemd/system/seon.service`
 * Reload config: `sudo systemctl daemon-reload`
 * Enable & start the service: `sudo systemctl enable seon.service --now`
 * View logs: `journalctl -u seon -xn100 | less`
