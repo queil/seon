@@ -67,7 +67,8 @@ if per endpoint, just add the `jwt` node there.
 
 ### Configure systemd
 
-*Assuming you save it in /opt/seon/seon.service`
+*Assuming you save it in /opt/seon/seon.service`*
+
 Example unit file:
 
 ```sh
