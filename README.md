@@ -8,7 +8,7 @@ A configurable JWT-authenticated sub-claim-authorized endpoint for running bash 
 
 ```sh
 curl -vvv -sS --fail-with-body -X POST -H "Authorization: Bearer $DEPLOY_TOKEN" \
-      http://your.url.com/deploy
+      https://your.url.com/deploy
 ```
 ## Install
 
