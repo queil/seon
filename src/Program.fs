@@ -57,19 +57,22 @@ let execute (endpoint: SeonEndpoint) : HttpHandler =
                 .LogInformation("Running: {Path} ({WorkingDir})", endpoint.Command.Path, endpoint.Command.WorkingDir)
 
             try
-
+                let logger = ctx.GetLogger()
                 let! output =
                     cli {
                         Shell BASH
                         Command(endpoint.Command.Path)
                         WorkingDirectory(endpoint.Command.WorkingDir)
-                        Output(fun (s: string) -> ctx.GetLogger().LogInformation("log: {Message}", s))
+                        Output(fun (s: string) -> logger.LogInformation("{Message}", s))
                     }
                     |> Command.executeAsync
                     |> Async.StartAsTask
 
                 output.Error
-                |> Option.iter (fun s -> ctx.GetLogger().LogError("error: {Message}", s))
+                |> Option.iter (fun s -> logger.LogError("{Message}", s))
+
+                output.Text
+                |> Option.iter (fun s -> logger.LogInformation("{Message}", s))
 
                 if output.ExitCode <> 0 then
                     ctx.SetStatusCode 500
