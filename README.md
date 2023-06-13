@@ -24,7 +24,7 @@ dotnet publish -r linux-x64 -c Release -p:PublishSingleFile=true --self-containe
 
 ### Configure seon
 
-:warning: For seon to be useful it needs to be available either on the interent or your internal network. Configuring that is beyond the scope of this document.
+:warning: For seon to be useful it needs to be available either on the internet or your internal network. Configuring that is beyond the scope of this document.
 
 If all your endpoints use the same JWT config you can configure it on the root level but you can override 
 if per endpoint, just add the `jwt` node there.

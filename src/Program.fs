@@ -10,11 +10,12 @@ open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Configuration
 open Giraffe
 open Microsoft.IdentityModel.Tokens
-open Fli.CE
 open Microsoft.Extensions.Options
-open Fli
 open System.Security.Claims
 open System.Collections.Generic
+open System.Diagnostics
+open Serilog
+open Serilog.Exceptions
 
 [<CLIMutable>]
 type JwtOptions =
@@ -51,27 +52,40 @@ let execute (endpoint: SeonEndpoint) : HttpHandler =
     fun (_: HttpFunc) (ctx: HttpContext) ->
 
         task {
-
-            ctx
-                .GetLogger(ctx.Request.Path)
-                .LogInformation("Running: {Path} ({WorkingDir})", endpoint.Command.Path, endpoint.Command.WorkingDir)
+            let logger = ctx.GetLogger(ctx.Request.Path)
 
             try
+                logger.LogInformation(
+                    "Running: {Path} ({WorkingDir})",
+                    endpoint.Command.Path,
+                    endpoint.Command.WorkingDir
+                )
 
-                let! output =
-                    cli {
-                        Shell BASH
-                        Command(endpoint.Command.Path)
-                        WorkingDirectory(endpoint.Command.WorkingDir)
-                        Output(fun (s: string) -> ctx.GetLogger().LogInformation("log: {Message}", s))
-                    }
-                    |> Command.executeAsync
-                    |> Async.StartAsTask
+                use ps =
+                    Process.Start(
+                        ProcessStartInfo(
+                            FileName = endpoint.Command.Path,
+                            WorkingDirectory = endpoint.Command.WorkingDir,
+                            UseShellExecute = false,
+                            RedirectStandardError = true,
+                            RedirectStandardOutput = true
+                        )
+                    )
 
-                output.Error
-                |> Option.iter (fun s -> ctx.GetLogger().LogError("error: {Message}", s))
+                ps.ErrorDataReceived.AddHandler(fun _ args ->
+                    if isNotNull args.Data then
+                        logger.LogInformation(args.Data))
 
-                if output.ExitCode <> 0 then
+                ps.OutputDataReceived.AddHandler(fun _ args ->
+                    if isNotNull args.Data then
+                        logger.LogInformation(args.Data))
+
+                ps.BeginOutputReadLine()
+                ps.BeginErrorReadLine()
+
+                do! ps.WaitForExitAsync()
+
+                if ps.ExitCode <> 0 then
                     ctx.SetStatusCode 500
 
                 return Some(ctx)
@@ -82,7 +96,7 @@ let execute (endpoint: SeonEndpoint) : HttpHandler =
                 return Some(ctx)
         }
 
-let errorHandler (ex: Exception) (logger: ILogger) =
+let errorHandler (ex: Exception) (logger: Microsoft.Extensions.Logging.ILogger) =
     logger.LogError(ex, "An unhandled exception has occurred while executing the request.")
     clearResponse >=> setStatusCode 500
 
@@ -183,7 +197,14 @@ for KeyValue(pathPrefix, config) in seonConfig.Endpoints do
         authBuilder.AddJwtBearer($"Bearer{pathPrefix}", configureJwtBearer config.Jwt)
         |> ignore
 
-builder.Logging.AddConsole().AddDebug() |> ignore
+Log.Logger <-
+    LoggerConfiguration()
+        .ReadFrom.Configuration(config)
+        .Enrich.WithExceptionDetails()
+        .CreateLogger()
+
+builder.Logging.AddSerilog() |> ignore
+builder.Host.UseSerilog() |> ignore
 
 let app = builder.Build()
 
@@ -197,10 +218,6 @@ if basePath <> "" then
 if app.Environment.IsDevelopment() then
     app.UseDeveloperExceptionPage() |> ignore
 
-app
-    .UseGiraffeErrorHandler(errorHandler)
-    .UseHttpsRedirection()
-    .UseAuthentication()
-    .UseGiraffe(webApp)
+app.UseGiraffeErrorHandler(errorHandler).UseAuthentication().UseGiraffe(webApp)
 
 app.Run()

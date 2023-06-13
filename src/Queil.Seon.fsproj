@@ -7,10 +7,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Fli" Version="1.*" />
     <PackageReference Include="Giraffe" Version="6.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="7.*" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="7.*" />
+    <PackageReference Include="Serilog.Exceptions" Version="8.*" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="7.*" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="7.*" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="4.*" />
   </ItemGroup>
 
   <ItemGroup>
